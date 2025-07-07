@@ -1,0 +1,58 @@
+[project]
+name = "alignment-rlhf"
+version = "0.1.0"
+description = "RLHF with REINFORCE based on 'Back to Basics' paper"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.7.1",
+    "transformers>=4.53.1",
+    "trl>=0.19.0",
+    "peft>=0.16.0",
+    "accelerate>=1.8.1",
+    "datasets>=3.6.0",
+    "bitsandbytes>=0.46.1",
+    "scipy>=1.15.3",
+    "einops>=0.8.1",
+    "tqdm>=4.67.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.12.2",
+    "pytest>=8.4.1",
+    "notebook>=7.4.4",
+    "pandas>=2.3.0",
+    "pre-commit>=4.2.0",
+    "matplotlib>=3.10.3",
+    "seaborn>=0.13.2",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long, handled by formatter
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

@@ -1,0 +1,26 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.1
+    hooks:
+      - id: ruff-check
+        args: [ --fix, --exit-non-zero-on-fix ]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace        # Удаляет пробелы в конце строк
+      - id: end-of-file-fixer          # Добавляет перевод строки в конце файла
+      - id: check-yaml                 # Проверяет синтаксис YAML файлов
+      - id: check-toml                 # Проверяет синтаксис TOML файлов
+      - id: check-json                 # Проверяет синтаксис JSON файлов
+      # - id: check-added-large-files    # Предотвращает добавление больших файлов
+      #   args: ['--maxkb=1000']
+      - id: check-merge-conflict       # Находит маркеры конфликтов слияния <<<< ====
+        args: [--assume-in-merge]
+      - id: detect-private-key         # Обнаруживает приватные SSH/GPG ключи
+      - id: check-case-conflict        # Проверяет конфликты регистра в именах файлов
+      - id: check-docstring-first      # Проверяет что docstring идет первым в Python
+      - id: debug-statements           # Находит debug statements (pdb, debugger)
+      - id: mixed-line-ending          # Проверяет смешанные окончания строк CRLF/LF
+      # - id: no-commit-to-branch

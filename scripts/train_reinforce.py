@@ -34,7 +34,7 @@ class ReinforceTrainer:
         )
         with torch.no_grad():
             logits = self.reward_model(**tokenized).logits
-            return torch.sigmoid(logits.squeeze(-1))
+            return logits.squeeze(-1)
 
     def train(self, dataset):
         dataloader = DataLoader(dataset, batch_size=self.config["batch_size"])
@@ -83,13 +83,18 @@ class ReinforceTrainer:
                 policy_log_probs_values = policy_log_probs.gather(
                     2, all_tokens.input_ids.unsqueeze(-1)
                 ).squeeze(-1)
-                ref_log_probs_values = ref_log_probs.gather(
-                    2, all_tokens.input_ids.unsqueeze(-1)
-                ).squeeze(-1)
+                # ref_log_probs_values = ref_log_probs.gather(
+                #     2, all_tokens.input_ids.unsqueeze(-1)
+                # ).squeeze(-1)
 
-                kl_penalty = (
-                    (policy_log_probs_values - ref_log_probs_values) * final_response_mask
-                ).sum(dim=1)
+                # kl_penalty = ((policy_log_probs_values - ref_log_probs_values) * final_response_mask).sum(dim=1)
+
+                # More robust KL divergence calculation
+                kl_div_per_token = F.kl_div(
+                    policy_log_probs, ref_log_probs.detach(), reduction="none", log_target=True
+                ).sum(dim=-1)
+                kl_penalty = (kl_div_per_token * final_response_mask).sum(dim=1)
+
                 kl_shaped_rewards = rewards - self.config["kl_beta"] * kl_penalty
 
                 self.moving_avg_baseline = (

@@ -21,17 +21,20 @@ class ReinforceTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.moving_avg_baseline = torch.tensor(0.0, device=self.device)
 
+    def _prepare_text_pair(self, prompts, responses):
+        return [
+            f"<|im_start|>user\n{p.strip()}<|im_end|>\n<|im_start|>assistant\n{r.strip()}<|im_end|>"
+            for p, r in zip(prompts, responses, strict=False)
+        ]
+
     def compute_rewards(self, prompts, responses):
-        texts = [p + r for p, r in zip(prompts, responses, strict=False)]
+        texts = self._prepare_text_pair(prompts, responses)
         tokenized = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
             self.device
         )
         with torch.no_grad():
             logits = self.reward_model(**tokenized).logits
-            return logits.squeeze(-1)
-
-    def compute_kl_penalty(self, log_probs, ref_log_probs):
-        return (log_probs - ref_log_probs).sum(dim=-1)
+            return torch.sigmoid(logits.squeeze(-1))
 
     def train(self, dataset):
         dataloader = DataLoader(dataset, batch_size=self.config["batch_size"])
@@ -40,9 +43,9 @@ class ReinforceTrainer:
             for i, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}")):
                 self.optimizer.zero_grad()
 
-                # Generate responses
+                prompts_text = batch["prompt"]
                 prompts_tokenized = self.tokenizer(
-                    batch["prompt"], return_tensors="pt", padding=True, truncation=True
+                    prompts_text, return_tensors="pt", padding=True, truncation=True
                 ).to(self.device)
 
                 generated_outputs = self.policy_model.generate(
@@ -54,20 +57,16 @@ class ReinforceTrainer:
                     pad_token_id=self.tokenizer.eos_token_id,
                 )
 
-                responses = self.tokenizer.batch_decode(
+                responses_text = self.tokenizer.batch_decode(
                     generated_outputs[:, prompts_tokenized.input_ids.shape[1] :],
                     skip_special_tokens=True,
                 )
 
-                # Compute rewards
-                rewards = self.compute_rewards(batch["prompt"], responses)
+                rewards = self.compute_rewards(prompts_text, responses_text)
 
-                # Compute log probabilities
+                all_texts = self._prepare_text_pair(prompts_text, responses_text)
                 all_tokens = self.tokenizer(
-                    [p + r for p, r in zip(batch["prompt"], responses, strict=False)],
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
+                    all_texts, return_tensors="pt", padding=True, truncation=True, max_length=512
                 ).to(self.device)
 
                 with torch.no_grad():
@@ -77,33 +76,42 @@ class ReinforceTrainer:
                 policy_logits = self.policy_model(**all_tokens).logits
                 policy_log_probs = F.log_softmax(policy_logits, dim=-1)
 
-                # Get log probs of generated tokens
-                response_log_probs = torch.gather(
-                    policy_log_probs, 2, all_tokens.input_ids.unsqueeze(-1)
+                input_ids = all_tokens.input_ids
+                attention_mask = all_tokens.attention_mask
+
+                # More robust log_probs calculation for loss
+                shifted_ids = input_ids[:, 1:]
+                shifted_log_probs = policy_log_probs[:, :-1]
+                log_probs_values = shifted_log_probs.gather(2, shifted_ids.unsqueeze(-1)).squeeze(
+                    -1
+                )
+                mask = attention_mask[:, 1:].float()
+                response_log_probs_for_loss = (log_probs_values * mask).sum(dim=1)
+
+                # KL penalty calculation
+                ref_log_probs_values = ref_log_probs.gather(2, input_ids.unsqueeze(-1)).squeeze(-1)
+                policy_log_probs_values = policy_log_probs.gather(
+                    2, input_ids.unsqueeze(-1)
                 ).squeeze(-1)
 
-                kl_penalty = self.compute_kl_penalty(
-                    response_log_probs,
-                    torch.gather(ref_log_probs, 2, all_tokens.input_ids.unsqueeze(-1)).squeeze(-1),
-                )
+                kl_penalty = (policy_log_probs_values - ref_log_probs_values).sum(dim=1)
 
-                # Compute advantage and loss
                 advantage = rewards - self.config["kl_beta"] * kl_penalty - self.moving_avg_baseline
-                loss = -(response_log_probs.sum(dim=-1) * advantage.detach()).mean()
+                loss = -(response_log_probs_for_loss * advantage.detach()).mean()
 
                 loss.backward()
                 self.optimizer.step()
 
-                # Update baseline
                 self.moving_avg_baseline = self.config[
                     "baseline_alpha"
                 ] * self.moving_avg_baseline + (1 - self.config["baseline_alpha"]) * (
                     rewards.mean().item()
                 )
 
-                print(
-                    f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
-                )
+                if i % 10 == 0:
+                    tqdm.write(
+                        f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
+                    )
 
 
 def main():
@@ -113,8 +121,8 @@ def main():
         "rlhf_model_path": "models/rlhf",
         "batch_size": 2,
         "epochs": 1,
-        "lr": 1e-5,
-        "kl_beta": 0.2,
+        "lr": 1e-5,  # Back to conservative LR
+        "kl_beta": 0.5,  # Increased KL penalty
         "max_new_tokens": 50,
         "baseline_alpha": 0.9,
     }
@@ -135,10 +143,7 @@ def main():
 
     optimizer = AdamW(policy_model.parameters(), lr=config["lr"])
 
-    # Use validation set for prompts
     val_dataset_raw = load_dataset("juyoungml/HelpSteer2-binarized", split="validation")
-
-    # The 'prompt' column contains the prompts.
     prompts = val_dataset_raw["prompt"]
 
     class PromptDataset(Dataset):

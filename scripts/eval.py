@@ -8,6 +8,13 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
 
 
+def _prepare_text_pair(prompts, responses):
+    return [
+        f"<|im_start|>user\n{p.strip()}<|im_end|>\n<|im_start|>assistant\n{r.strip()}<|im_end|>"
+        for p, r in zip(prompts, responses, strict=False)
+    ]
+
+
 def generate_responses(model, tokenizer, dataset, batch_size=4, max_new_tokens=50):
     dataloader = DataLoader(dataset, batch_size=batch_size)
     prompts_list = []
@@ -15,7 +22,9 @@ def generate_responses(model, tokenizer, dataset, batch_size=4, max_new_tokens=5
 
     model.eval()
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"Generating with {model.config._name_or_path}"):
+        for batch in tqdm(
+            dataloader, desc=f"Generating with {os.path.basename(model.config._name_or_path)}"
+        ):
             prompts = batch["prompt"]
             prompts_tokenized = tokenizer(
                 prompts, return_tensors="pt", padding=True, truncation=True
@@ -47,13 +56,13 @@ def evaluate_rewards(reward_model, tokenizer, prompts, responses, batch_size=4):
             batch_prompts = prompts[i : i + batch_size]
             batch_responses = responses[i : i + batch_size]
 
-            texts = [p + r for p, r in zip(batch_prompts, batch_responses, strict=False)]
-            tokenized = tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
-                reward_model.device
-            )
+            texts = _prepare_text_pair(batch_prompts, batch_responses)
+            tokenized = tokenizer(
+                texts, padding=True, truncation=True, return_tensors="pt", max_length=512
+            ).to(reward_model.device)
 
             logits = reward_model(**tokenized).logits
-            rewards = logits.squeeze(-1).cpu().numpy().tolist()
+            rewards = torch.sigmoid(logits.squeeze(-1)).cpu().numpy().tolist()
             rewards_list.extend(rewards)
 
     return rewards_list

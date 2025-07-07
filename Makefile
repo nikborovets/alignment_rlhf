@@ -3,17 +3,23 @@
 all: sft rm reinforce eval
 
 sft:
-	python scripts/download_sft.py
+	@echo "--- Downloading SFT model ---"
+	python scripts/save_sft_model.py
 
 rm:
-	PYTHONPATH=$$(pwd) python scripts/train_rm_manual.py
+	@echo "--- Training Reward Model ---"
+	PYTHONPATH=$(CURDIR) python scripts/train_rm_manual.py
 
 reinforce:
-	PYTHONPATH=$$(pwd) python scripts/train_reinforce.py
+	@echo "--- Training with REINFORCE ---"
+	PYTHONPATH=$(CURDIR) python scripts/train_reinforce.py
 
 eval:
-	PYTHONPATH=$$(pwd) python scripts/eval.py
+	@echo "--- Evaluating models ---"
+	PYTHONPATH=$(CURDIR) python scripts/eval.py
 
 clean:
+	@echo "--- Cleaning up models and reports ---"
 	rm -rf models/*
 	rm -rf reports/*.csv
+	@echo "Done."

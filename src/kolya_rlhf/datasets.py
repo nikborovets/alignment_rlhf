@@ -37,3 +37,14 @@ class RewardDataset(Dataset):
             "input_ids_rejected": rejected_tokenized["input_ids"].squeeze(0),
             "attention_mask_rejected": rejected_tokenized["attention_mask"].squeeze(0),
         }
+
+
+class PromptDataset(Dataset):
+    def __init__(self, prompts):
+        self.prompts = prompts
+
+    def __len__(self):
+        return len(self.prompts)
+
+    def __getitem__(self, idx):
+        return {"prompt": self.prompts[idx]}

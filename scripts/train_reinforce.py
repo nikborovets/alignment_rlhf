@@ -4,9 +4,17 @@ import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer
+
+from src.kolya_rlhf.datasets import PromptDataset
+from src.kolya_rlhf.utils import (
+    compute_rewards_with_kl,
+    get_causal_lm,
+    get_reward_model,
+    get_tokenizer,
+    prepare_text_pair,
+)
 
 
 class ReinforceTrainer:
@@ -21,23 +29,15 @@ class ReinforceTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.moving_avg_baseline = torch.tensor(0.0, device=self.device)
 
-    def _prepare_text_pair(self, prompts, responses):
-        return [
-            f"<|im_start|>user\n{p.strip()}<|im_end|>\n<|im_start|>assistant\n{r.strip()}<|im_end|>"
-            for p, r in zip(prompts, responses, strict=False)
-        ]
-
-    def compute_rewards(self, prompts, responses):
-        texts = self._prepare_text_pair(prompts, responses)
-        tokenized = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt").to(
-            self.device
-        )
-        with torch.no_grad():
-            logits = self.reward_model(**tokenized).logits
-            return logits.squeeze(-1)
-
     def train(self, dataset):
         dataloader = DataLoader(dataset, batch_size=self.config["batch_size"])
+        generation_config = {
+            "max_new_tokens": self.config["max_new_tokens"],
+            "do_sample": True,
+            "top_k": 50,
+            "top_p": 0.95,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
 
         for epoch in range(self.config["epochs"]):
             self.optimizer.zero_grad()
@@ -47,30 +47,38 @@ class ReinforceTrainer:
                     prompts_text, return_tensors="pt", padding=True, truncation=True
                 ).to(self.device)
 
+                # Generate responses
                 generated_outputs = self.policy_model.generate(
-                    **prompts_tokenized,
-                    max_new_tokens=self.config["max_new_tokens"],
-                    do_sample=True,
-                    top_k=50,
-                    top_p=0.95,
-                    pad_token_id=self.tokenizer.eos_token_id,
+                    **prompts_tokenized, **generation_config
                 )
-
                 responses_text = self.tokenizer.batch_decode(
                     generated_outputs[:, prompts_tokenized.input_ids.shape[1] :],
                     skip_special_tokens=True,
                 )
 
-                rewards = self.compute_rewards(prompts_text, responses_text)
+                # Compute rewards and KL penalty
+                rewards, kl_penalty, kl_shaped_rewards = compute_rewards_with_kl(
+                    self.reward_model,
+                    self.policy_model,
+                    self.ref_policy_model,
+                    self.tokenizer,
+                    prompts_text,
+                    responses_text,
+                    self.config["kl_beta"],
+                )
 
-                all_texts = self._prepare_text_pair(prompts_text, responses_text)
+                # Update baseline
+                self.moving_avg_baseline = (
+                    self.config["baseline_alpha"] * self.moving_avg_baseline
+                    + (1 - self.config["baseline_alpha"]) * kl_shaped_rewards.mean().detach()
+                )
+                advantage = (kl_shaped_rewards - self.moving_avg_baseline).detach()
+
+                # Calculate loss
+                all_texts = prepare_text_pair(prompts_text, responses_text)
                 all_tokens = self.tokenizer(
                     all_texts, return_tensors="pt", padding=True, truncation=True, max_length=512
                 ).to(self.device)
-
-                with torch.no_grad():
-                    ref_logits = self.ref_policy_model(**all_tokens).logits
-                    ref_log_probs = F.log_softmax(ref_logits, dim=-1)
 
                 policy_logits = self.policy_model(**all_tokens).logits
                 policy_log_probs = F.log_softmax(policy_logits, dim=-1)
@@ -83,26 +91,6 @@ class ReinforceTrainer:
                 policy_log_probs_values = policy_log_probs.gather(
                     2, all_tokens.input_ids.unsqueeze(-1)
                 ).squeeze(-1)
-                # ref_log_probs_values = ref_log_probs.gather(
-                #     2, all_tokens.input_ids.unsqueeze(-1)
-                # ).squeeze(-1)
-
-                # kl_penalty = ((policy_log_probs_values - ref_log_probs_values) * final_response_mask).sum(dim=1)
-
-                # More robust KL divergence calculation
-                kl_div_per_token = F.kl_div(
-                    policy_log_probs, ref_log_probs.detach(), reduction="none", log_target=True
-                ).sum(dim=-1)
-                kl_penalty = (kl_div_per_token * final_response_mask).sum(dim=1)
-
-                kl_shaped_rewards = rewards - self.config["kl_beta"] * kl_penalty
-
-                self.moving_avg_baseline = (
-                    self.config["baseline_alpha"] * self.moving_avg_baseline
-                    + (1 - self.config["baseline_alpha"]) * kl_shaped_rewards.mean().detach()
-                )
-
-                advantage = (kl_shaped_rewards - self.moving_avg_baseline).detach()
 
                 response_log_probs_for_loss = (policy_log_probs_values * final_response_mask).sum(
                     dim=1
@@ -119,7 +107,7 @@ class ReinforceTrainer:
 
                 if i % 10 == 0:
                     tqdm.write(
-                        f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {kl_shaped_rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
+                        f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
                     )
 
 
@@ -137,36 +125,20 @@ def main():
         "gradient_accumulation_steps": 8,
     }
 
-    tokenizer = AutoTokenizer.from_pretrained(config["sft_model_path"])
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-
-    policy_model = AutoModelForCausalLM.from_pretrained(config["sft_model_path"])
-    ref_policy_model = AutoModelForCausalLM.from_pretrained(config["sft_model_path"])
-    reward_model = AutoModelForSequenceClassification.from_pretrained(config["rm_model_path"])
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    policy_model.to(device)
-    ref_policy_model.to(device).eval()
-    reward_model.to(device).eval()
+
+    tokenizer = get_tokenizer(config["sft_model_path"])
+    policy_model = get_causal_lm(config["sft_model_path"], device)
+    ref_policy_model = get_causal_lm(
+        config["sft_model_path"],
+        device,
+    ).eval()
+    reward_model = get_reward_model(config["rm_model_path"], device).eval()
 
     optimizer = AdamW(policy_model.parameters(), lr=config["lr"])
 
     val_dataset_raw = load_dataset("juyoungml/HelpSteer2-binarized", split="validation")
-    prompts = val_dataset_raw["prompt"]
-
-    class PromptDataset(Dataset):
-        def __init__(self, prompts):
-            self.prompts = prompts
-
-        def __len__(self):
-            return len(self.prompts)
-
-        def __getitem__(self, idx):
-            return {"prompt": self.prompts[idx]}
-
-    prompt_dataset = PromptDataset(prompts)
+    prompt_dataset = PromptDataset(val_dataset_raw["prompt"])
 
     trainer = ReinforceTrainer(
         config, policy_model, ref_policy_model, reward_model, tokenizer, optimizer

@@ -7,13 +7,10 @@ from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    get_linear_schedule_with_warmup,
-)
+from transformers import get_linear_schedule_with_warmup
 
 from src.kolya_rlhf.datasets import RewardDataset
+from src.kolya_rlhf.utils import get_reward_model, get_tokenizer
 
 
 def train_reward_model_manual():
@@ -25,13 +22,8 @@ def train_reward_model_manual():
         print(f"Reward model already exists in {output_dir}. Skipping training.")
         return
 
-    tokenizer = AutoTokenizer.from_pretrained(sft_model_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForSequenceClassification.from_pretrained(sft_model_path, num_labels=1).to(
-        device
-    )
+    tokenizer = get_tokenizer(sft_model_path, padding_side="right")
+    model = get_reward_model(sft_model_path, device, num_labels=1)
 
     train_dataset_raw = load_dataset("juyoungml/HelpSteer2-binarized", split="train")
     eval_dataset_raw = load_dataset("juyoungml/HelpSteer2-binarized", split="validation")

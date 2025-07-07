@@ -164,3 +164,9 @@ ipython_config.py
 .python-version
 *.sage.py
 target/
+
+Back-to-Basics-REINFORCE/
+models/sft/
+models/rm/
+models/rlhf/
+example.py

@@ -40,9 +40,8 @@ class ReinforceTrainer:
         dataloader = DataLoader(dataset, batch_size=self.config["batch_size"])
 
         for epoch in range(self.config["epochs"]):
+            self.optimizer.zero_grad()
             for i, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch + 1}")):
-                self.optimizer.zero_grad()
-
                 prompts_text = batch["prompt"]
                 prompts_tokenized = self.tokenizer(
                     prompts_text, return_tensors="pt", padding=True, truncation=True
@@ -76,41 +75,46 @@ class ReinforceTrainer:
                 policy_logits = self.policy_model(**all_tokens).logits
                 policy_log_probs = F.log_softmax(policy_logits, dim=-1)
 
-                input_ids = all_tokens.input_ids
-                attention_mask = all_tokens.attention_mask
+                prompts_len = prompts_tokenized.input_ids.shape[1]
+                response_mask = torch.zeros_like(all_tokens.attention_mask)
+                response_mask[:, prompts_len:] = 1
+                final_response_mask = response_mask * all_tokens.attention_mask
 
-                # More robust log_probs calculation for loss
-                shifted_ids = input_ids[:, 1:]
-                shifted_log_probs = policy_log_probs[:, :-1]
-                log_probs_values = shifted_log_probs.gather(2, shifted_ids.unsqueeze(-1)).squeeze(
-                    -1
-                )
-                mask = attention_mask[:, 1:].float()
-                response_log_probs_for_loss = (log_probs_values * mask).sum(dim=1)
-
-                # KL penalty calculation
-                ref_log_probs_values = ref_log_probs.gather(2, input_ids.unsqueeze(-1)).squeeze(-1)
                 policy_log_probs_values = policy_log_probs.gather(
-                    2, input_ids.unsqueeze(-1)
+                    2, all_tokens.input_ids.unsqueeze(-1)
+                ).squeeze(-1)
+                ref_log_probs_values = ref_log_probs.gather(
+                    2, all_tokens.input_ids.unsqueeze(-1)
                 ).squeeze(-1)
 
-                kl_penalty = (policy_log_probs_values - ref_log_probs_values).sum(dim=1)
+                kl_penalty = (
+                    (policy_log_probs_values - ref_log_probs_values) * final_response_mask
+                ).sum(dim=1)
+                kl_shaped_rewards = rewards - self.config["kl_beta"] * kl_penalty
 
-                advantage = rewards - self.config["kl_beta"] * kl_penalty - self.moving_avg_baseline
-                loss = -(response_log_probs_for_loss * advantage.detach()).mean()
+                self.moving_avg_baseline = (
+                    self.config["baseline_alpha"] * self.moving_avg_baseline
+                    + (1 - self.config["baseline_alpha"]) * kl_shaped_rewards.mean().detach()
+                )
+
+                advantage = (kl_shaped_rewards - self.moving_avg_baseline).detach()
+
+                response_log_probs_for_loss = (policy_log_probs_values * final_response_mask).sum(
+                    dim=1
+                )
+
+                loss = -(response_log_probs_for_loss * advantage).mean()
+                loss = loss / self.config["gradient_accumulation_steps"]
 
                 loss.backward()
-                self.optimizer.step()
 
-                self.moving_avg_baseline = self.config[
-                    "baseline_alpha"
-                ] * self.moving_avg_baseline + (1 - self.config["baseline_alpha"]) * (
-                    rewards.mean().item()
-                )
+                if (i + 1) % self.config["gradient_accumulation_steps"] == 0:
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
 
                 if i % 10 == 0:
                     tqdm.write(
-                        f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
+                        f"Batch {i}: Loss: {loss.item():.4f}, Mean Reward: {kl_shaped_rewards.mean().item():.4f}, KL Penalty: {kl_penalty.mean().item():.4f}"
                     )
 
 
@@ -121,10 +125,11 @@ def main():
         "rlhf_model_path": "models/rlhf",
         "batch_size": 2,
         "epochs": 1,
-        "lr": 1e-5,  # Back to conservative LR
-        "kl_beta": 0.5,  # Increased KL penalty
+        "lr": 2e-6,
+        "kl_beta": 0.1,
         "max_new_tokens": 50,
         "baseline_alpha": 0.9,
+        "gradient_accumulation_steps": 8,
     }
 
     tokenizer = AutoTokenizer.from_pretrained(config["sft_model_path"])

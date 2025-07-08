@@ -26,7 +26,12 @@ class ReinforceTrainer:
         self.reward_model = reward_model
         self.optimizer = optimizer
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
         self.moving_avg_baseline = torch.tensor(0.0, device=self.device)
 
     def train(self, dataset):
@@ -125,7 +130,12 @@ def main():
         "gradient_accumulation_steps": 8,
     }
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     tokenizer = get_tokenizer(config["sft_model_path"])
     policy_model = get_causal_lm(config["sft_model_path"], device)

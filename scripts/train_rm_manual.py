@@ -16,7 +16,12 @@ from src.kolya_rlhf.utils import get_reward_model, get_tokenizer
 def train_reward_model_manual():
     sft_model_path = "models/sft"
     output_dir = "models/rm"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     if os.path.exists(output_dir) and os.listdir(output_dir):
         print(f"Reward model already exists in {output_dir}. Skipping training.")
@@ -35,7 +40,7 @@ def train_reward_model_manual():
     eval_loader = DataLoader(eval_dataset, batch_size=1)
 
     optimizer = AdamW(model.parameters(), lr=5e-5)
-    scaler = GradScaler()
+    scaler = GradScaler(enabled=(device.type == "cuda"))
 
     num_train_epochs = 1
     num_training_steps = num_train_epochs * len(train_loader)
@@ -51,7 +56,7 @@ def train_reward_model_manual():
         for batch in progress_bar:
             optimizer.zero_grad()
 
-            with autocast("cuda"):
+            with autocast(device_type=device.type, enabled=(device.type == "cuda")):
                 rewards_chosen = model(
                     input_ids=batch["input_ids_chosen"].to(device),
                     attention_mask=batch["attention_mask_chosen"].to(device),
@@ -78,7 +83,7 @@ def train_reward_model_manual():
         total_eval_accuracy = 0
         with torch.no_grad():
             for batch in tqdm(eval_loader, desc="Evaluating"):
-                with autocast("cuda"):
+                with autocast(device_type=device.type, enabled=(device.type == "cuda")):
                     rewards_chosen = model(
                         input_ids=batch["input_ids_chosen"].to(device),
                         attention_mask=batch["attention_mask_chosen"].to(device),
